@@ -5,61 +5,145 @@ on:
     branches: ["main", "develop", "feature/**"]
   pull_request:
     branches: ["main"]
-jobs:
-  build-test:
-    runs-on: ubuntu-latest
 
+permissions:
+  contents: read
+  actions: read
+  checks: write
+
+env:
+  JAVA_VERSION: "17"
+  MIN_COVERAGE: 70
+
+jobs:
+  detect-changes:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Detect changed microservices
+        id: detect
+        run: |
+          git fetch origin main
+          CHANGED=$(git diff --name-only origin/main...HEAD | grep -E '^(customers-service|vets-service|visit-service|api-gateway|admin-server|discovery-server|config-server)/' | cut -d'/' -f1 | sort -u | xargs)
+          echo "Changed services: $CHANGED"
+          echo "changed=$CHANGED" >> $GITHUB_OUTPUT
+
+  test:
+    name: Unit Test & Coverage
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
-
-      - name: Cache Maven packages
-        uses: actions/cache@v4
+          java-version: ${{ env.JAVA_VERSION }}
+      - uses: actions/cache@v4
         with:
           path: ~/.m2
           key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
           restore-keys: |
             ${{ runner.os }}-maven-
-      - name: Detect changed microservices
-        id: changes
-        run: |
-          echo "CHANGED_SERVICES=$(git diff --name-only HEAD~1 HEAD | grep 'service' | cut -d'/' -f1 | sort -u | xargs)" >> $GITHUB_ENV
-          echo "Changed services: $CHANGED_SERVICES"
+
       - name: Run tests
-        if: env.CHANGED_SERVICES != ''
         run: |
-          for s in $CHANGED_SERVICES; do
-            echo "Testing $s"
-            cd $s
-            mvn clean test
-            cd ..
-          done
-        else:
-          mvn clean test
+          if [ -z "${{ needs.detect-changes.outputs.changed }}" ]; then
+            echo "No changed services — running all tests."
+            mvn -B clean test
+          else
+            for s in ${{ needs.detect-changes.outputs.changed }}; do
+              echo "Testing $s ..."
+              cd $s
+              mvn -B clean test
+              cd ..
+            done
+          fi
+
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-reports
+          name: junit-reports
           path: '**/target/surefire-reports/*.xml'
 
-      - name: Upload JaCoCo coverage reports
+      - name: Upload JaCoCo reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-reports
-          path: '**/target/site/jacoco/'
-      - name: Check coverage threshold
+          name: jacoco-reports
+          path: '**/target/site/jacoco/jacoco.xml'
+
+  coverage-check:
+    name: Verify Coverage ≥ ${{ env.MIN_COVERAGE }}%
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: jacoco-reports
+          path: ./reports
+
+      - name: Calculate coverage
         run: |
-          COVERAGE=$(grep -h -oP '(?<=<counter type="INSTRUCTION" missed=")\d+" covered="\d+"' **/jacoco.xml | awk '{missed+=$1; covered+=$2} END {print covered*100/(missed+covered)}')
-          echo "Coverage: $COVERAGE%"
-          if (( $(echo "$COVERAGE < 70" | bc -l) )); then
-            echo "Coverage below 70%! Failing pipeline."
+          total_missed=0
+          total_covered=0
+          for file in $(find ./reports -name "jacoco.xml"); do
+            while read -r line; do
+              missed=$(echo "$line" | grep -oP 'missed="\K[0-9]+')
+              covered=$(echo "$line" | grep -oP 'covered="\K[0-9]+')
+              total_missed=$((total_missed + missed))
+              total_covered=$((total_covered + covered))
+            done < <(grep '<counter type="INSTRUCTION"' "$file")
+          done
+          coverage=$(awk -v c=$total_covered -v m=$total_missed 'BEGIN {printf "%.2f", c*100/(c+m)}')
+          echo "Coverage: $coverage%"
+          if (( $(echo "$coverage < $MIN_COVERAGE" | bc -l) )); then
+            echo "Coverage below $MIN_COVERAGE%"
             exit 1
+          else
+            echo "Coverage OK ($coverage%)"
           fi
+
+  build:
+    name: Build Changed Services
+    needs: [test, coverage-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Build services
+        run: |
+          if [ -z "${{ needs.detect-changes.outputs.changed }}" ]; then
+            echo "No changed services — building all modules."
+            mvn -B clean package -DskipTests
+          else
+            for s in ${{ needs.detect-changes.outputs.changed }}; do
+              echo "Building $s ..."
+              cd $s
+              mvn -B clean package -DskipTests
+              cd ..
+            done
+          fi
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-jars
+          path: '**/target/*.jar'
