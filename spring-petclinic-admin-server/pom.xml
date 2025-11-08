@@ -9,11 +9,19 @@
     <packaging>jar</packaging>
     <description>Spring Boot Admin server</description>
 
+    <!-- <parent>
+        <groupId>org.springframework.samples</groupId>
+        <artifactId>spring-petclinic-microservices</artifactId>
+        <version>3.4.1</version>
+    </parent> -->
+
     <parent>
         <groupId>org.springframework.samples</groupId>
         <artifactId>spring-petclinic-microservices</artifactId>
         <version>3.4.1</version>
+        <relativePath>../pom.xml</relativePath> <!-- path to your parent -->
     </parent>
+
 
     <properties>
         <spring-boot-admin.version>3.4.1</spring-boot-admin.version>
