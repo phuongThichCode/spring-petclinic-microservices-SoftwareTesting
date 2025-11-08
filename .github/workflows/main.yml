@@ -65,6 +65,14 @@ jobs:
               cd ..
             done
           fi
+          
+      - name: Debug list files in workspace
+        if: always()
+        run: |
+          echo "Listing coverage files..."
+          find . -type f -name "jacoco*.xml" | sort || true
+          echo "Listing target directories..."
+          find . -type d -name "jacoco" | sort || true
 
       - name: Upload test reports
         if: always()
